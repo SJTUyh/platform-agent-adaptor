@@ -21,8 +21,6 @@ logger = logging.getLogger("agent_adaptor.http_api")
 
 MAX_BODY = 64 * 1024
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-PATH_HANDLE = "/api/v1/issue/handle"
-PATH_LATEST = "/api/v1/issue/tasks/latest"
 PATH_KB_SEARCH = "/api/v1/kb/search"
 PATH_KB_WIKI = "/api/v1/kb/wiki"
 PATH_PUBLISH = "/api/v1/issue/publish"
@@ -161,34 +159,10 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._error(401, "UNAUTHORIZED", "缺少或错误的访问令牌")
             return
-        if path.path == PATH_LATEST:
-            self._get_latest(path)
-            return
         if path.path == PATH_KB_WIKI:
             self._get_wiki(path)
             return
         self._error(404, "NOT_FOUND", "接口不存在")
-
-    def _get_latest(self, path) -> None:
-        try:
-            query = parse_qs(path.query)
-            repo = _parse_repo((query.get("repo") or [""])[0])
-            raw_number = (query.get("number") or [""])[0].strip()
-            if not raw_number.isdigit():
-                raise _BadRequest("number 必须是不小于 1 的整数")
-            number = _parse_number(int(raw_number))
-            self._check_repo_allowed(repo)
-        except _UnsupportedRepo as exc:
-            self._error(422, "REPO_UNSUPPORTED", f"Issue Master 未托管该仓库：{exc.repo}")
-            return
-        except _BadRequest as exc:
-            self._error(400, "INVALID_REQUEST", exc.message)
-            return
-        try:
-            self._send_json(200, self.server.service.platform_task_status(repo, number))
-        except Exception:  # noqa: BLE001 - 不向调用方泄漏堆栈
-            logger.exception("平台 API 查询任务状态失败（%s#%s）", repo, number)
-            self._error(500, "INTERNAL_ERROR", "查询任务状态失败，请查看 issue_master 日志")
 
     def _get_wiki(self, path) -> None:
         try:
@@ -199,7 +173,7 @@ class _Handler(BaseHTTPRequestHandler):
                 raise _BadRequest("topic 不能为空")
             self._check_repo_allowed(repo)
         except _UnsupportedRepo as exc:
-            self._error(422, "REPO_UNSUPPORTED", f"Issue Master 未托管该仓库：{exc.repo}")
+            self._error(422, "REPO_UNSUPPORTED", f"platform-agent-adaptor 未托管该仓库：{exc.repo}")
             return
         except _BadRequest as exc:
             self._error(400, "INVALID_REQUEST", exc.message)
@@ -211,7 +185,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except Exception:  # noqa: BLE001
             logger.exception("知识库 wiki 读取失败（%s / %s）", repo, topic)
-            self._error(502, "KB_UNAVAILABLE", "知识库不可用，请查看 issue_master 与 deepwiki 日志")
+            self._error(502, "KB_UNAVAILABLE", "知识库不可用，请查看 platform-agent-adaptor 与 deepwiki 日志")
             return
         if not str(result.get("text") or "").strip():
             self._error(404, "KB_WIKI_NOT_FOUND", f"未找到 wiki 页面：{topic}")
@@ -223,9 +197,6 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._error(401, "UNAUTHORIZED", "缺少或错误的访问令牌")
             return
-        if path.path == PATH_HANDLE:
-            self._post_handle()
-            return
         if path.path == PATH_KB_SEARCH:
             self._post_kb_search()
             return
@@ -233,40 +204,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._post_publish()
             return
         self._error(404, "NOT_FOUND", "接口不存在")
-
-    def _post_handle(self) -> None:
-        if not self.server.limiter.allow():
-            self._error(429, "RATE_LIMITED", "请求过于频繁，请稍后重试")
-            return
-        try:
-            payload = self._read_json()
-            repo = _parse_repo(payload.get("repo"))
-            number = _parse_number(payload.get("number"))
-            hint = _parse_text(payload.get("hint"), "hint", 500)
-            requester = _parse_text(payload.get("requester"), "requester", 120, "platform")
-            self._check_repo_allowed(repo)
-        except _UnsupportedRepo as exc:
-            self._error(422, "REPO_UNSUPPORTED", f"Issue Master 未托管该仓库：{exc.repo}")
-            return
-        except _BadRequest as exc:
-            self._error(400, "INVALID_REQUEST", exc.message)
-            return
-        try:
-            task_id = self.server.service.start_from_platform(
-                repo, number, requester or "platform", hint
-            )
-        except ValueError as exc:
-            self._error(400, "INVALID_REQUEST", str(exc))
-            return
-        except Exception:  # noqa: BLE001 - 不向调用方泄漏堆栈
-            logger.exception("平台 API 创建处理任务失败（%s#%s）", repo, number)
-            self._error(500, "INTERNAL_ERROR", "创建处理任务失败，请查看 issue_master 日志")
-            return
-        logger.info("平台触发处理任务：%s#%s（task=%s, requester=%s）", repo, number, task_id, requester)
-        self._send_json(
-            202,
-            {"taskId": int(task_id), "status": "queued", "repo": repo, "number": number},
-        )
 
     def _post_kb_search(self) -> None:
         try:
@@ -278,7 +215,7 @@ class _Handler(BaseHTTPRequestHandler):
             top_k = _parse_int(payload.get("topK", 8), "topK", 1, MAX_TOP_K)
             self._check_repo_allowed(repo)
         except _UnsupportedRepo as exc:
-            self._error(422, "REPO_UNSUPPORTED", f"Issue Master 未托管该仓库：{exc.repo}")
+            self._error(422, "REPO_UNSUPPORTED", f"platform-agent-adaptor 未托管该仓库：{exc.repo}")
             return
         except _BadRequest as exc:
             self._error(400, "INVALID_REQUEST", exc.message)
@@ -293,11 +230,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except Exception:  # noqa: BLE001 - 知识库异常如实回报 502
             logger.exception("知识库检索失败（%s）", repo)
-            self._error(502, "KB_UNAVAILABLE", "知识库不可用，请查看 issue_master 与 deepwiki 日志")
+            self._error(502, "KB_UNAVAILABLE", "知识库不可用，请查看 platform-agent-adaptor 与 deepwiki 日志")
             return
         self._send_json(200, data)
 
     def _post_publish(self) -> None:
+        if not self.server.limiter.allow():
+            self._error(429, "RATE_LIMITED", "请求过于频繁，请稍后重试")
+            return
         try:
             payload = self._read_json()
             repo = _parse_repo(payload.get("repo"))
@@ -319,7 +259,7 @@ class _Handler(BaseHTTPRequestHandler):
             )
             self._check_repo_allowed(repo)
         except _UnsupportedRepo as exc:
-            self._error(422, "REPO_UNSUPPORTED", f"Issue Master 未托管该仓库：{exc.repo}")
+            self._error(422, "REPO_UNSUPPORTED", f"platform-agent-adaptor 未托管该仓库：{exc.repo}")
             return
         except _BadRequest as exc:
             self._error(400, "INVALID_REQUEST", exc.message)
@@ -342,7 +282,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except Exception:  # noqa: BLE001 - 不向调用方泄漏堆栈
             logger.exception("外部草稿发布失败（%s#%s）", repo, number)
-            self._error(500, "INTERNAL_ERROR", "发布失败，请查看 issue_master 日志")
+            self._error(500, "INTERNAL_ERROR", "发布失败，请查看 platform-agent-adaptor 日志")
             return
         logger.info("外部草稿已发布：%s#%s（requester=%s）", repo, number, requester)
         self._send_json(200, result)
@@ -354,7 +294,7 @@ class _UnsupportedRepo(Exception):
         self.repo = repo
 
 
-class IssueMasterHTTPServer(ThreadingHTTPServer):
+class AgentAdaptorHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
@@ -387,11 +327,11 @@ def create_http_server(
     search_rate_limit_per_minute: int = 30,
     tls_cert: str = "",
     tls_key: str = "",
-) -> IssueMasterHTTPServer:
+) -> AgentAdaptorHTTPServer:
     """构建（尚未 start）的 HTTP 服务；token 为空时直接拒绝。"""
     if not token:
-        raise ValueError("ISSUE_MASTER_API_TOKEN 不能为空")
-    server = IssueMasterHTTPServer(
+        raise ValueError("ADAPTOR_API_TOKEN 不能为空")
+    server = AgentAdaptorHTTPServer(
         (host, int(port)),
         service=service,
         token=token,
@@ -409,7 +349,7 @@ def create_http_server(
     return server
 
 
-def start_in_thread(server: ThreadingHTTPServer, name: str = "issue-master-api") -> threading.Thread:
+def start_in_thread(server: ThreadingHTTPServer, name: str = "agent-adaptor-api") -> threading.Thread:
     thread = threading.Thread(target=server.serve_forever, name=name, daemon=True)
     thread.start()
     return thread

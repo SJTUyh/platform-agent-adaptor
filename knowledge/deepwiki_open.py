@@ -13,12 +13,11 @@ import json
 import logging
 from typing import Any
 
-from agents.base import AnswerResult, Ref
 from adapters.deepwiki_client import DeepWikiClient
 from config import Config
-from knowledge.base import IndexStatus
+from knowledge.base import AnswerResult, IndexStatus, Ref
 
-logger = logging.getLogger("issue_master.kb.deepwiki")
+logger = logging.getLogger("agent_adaptor.kb.deepwiki")
 
 # 索引状态原文 → 本项目归一状态
 _INDEXED_WORDS = ("indexed", "ready", "success", "completed", "done", "ok", "fresh")

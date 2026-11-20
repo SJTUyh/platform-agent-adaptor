@@ -27,7 +27,7 @@ import httpx
 
 from config import Config
 
-logger = logging.getLogger("issue_master.deepwiki")
+logger = logging.getLogger("agent_adaptor.deepwiki")
 
 # `/repo/prepare` 首次 clone + 向量化可能很久，超时不得短于 10 分钟
 _MIN_PREPARE_TIMEOUT = 600.0

@@ -1,42 +1,18 @@
-"""SQLite 访问层：单行配置表、索引/缓存、issue 状态、事件去重、审计。
+"""SQLite 访问层：知识库配置、索引/缓存、备份历史、发布幂等与审计。
 
-表结构一次建全（见 PLAN §6.7），M0 只用到其中一部分，避免 M1~M3 再改 schema。
-
-单行配置表（`llm_config` / `digest_config` / `kb_config`）遵循参考项目约定：
-**首启把 .env 播种进来，之后以 DB 为准**（INSERT OR IGNORE，重启不覆盖已有值）。
+知识库配置表（`kb_config`）遵循：**首启把 .env 播种进来，之后以 DB 为准**
+（INSERT OR IGNORE，重启不覆盖已有值）。本服务不内置 Agent/LLM，因此不再有
+`llm_config` / `digest_config` / `issue_tasks` / `issue_drafts` 等表。
 """
-import json
 import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from config import Config
 
 SCHEMA = """
--- LLM 配置（单行）
-CREATE TABLE IF NOT EXISTS llm_config (
-  id          INTEGER PRIMARY KEY CHECK (id = 1),
-  base_url    TEXT NOT NULL,
-  model       TEXT NOT NULL,
-  api_key_enc BLOB,                     -- Fernet 密文；空=NULL
-  timeout     INTEGER NOT NULL,
-  updated_by  TEXT NOT NULL DEFAULT '',
-  updated_at  TEXT NOT NULL
-);
-
--- 巡检配置（单行）
-CREATE TABLE IF NOT EXISTS digest_config (
-  id         INTEGER PRIMARY KEY CHECK (id = 1),
-  repos      TEXT NOT NULL,             -- 逗号分隔的仓库列表
-  days       INTEGER NOT NULL,
-  schedule   TEXT NOT NULL,             -- "HH:MM"；空串=不定时
-  enabled    INTEGER NOT NULL,
-  last_run   TEXT NOT NULL,             -- 最近一次定时执行日期 YYYY-MM-DD
-  updated_at TEXT NOT NULL
-);
-
 -- 仓库索引状态
 CREATE TABLE IF NOT EXISTS kb_index (
   repo          TEXT PRIMARY KEY,
@@ -79,37 +55,6 @@ CREATE TABLE IF NOT EXISTS kb_backup (
   trigger      TEXT NOT NULL,           -- scheduled/manual
   status       TEXT NOT NULL,           -- ok/failed/skipped
   created_at   TEXT NOT NULL
-);
-
--- 一次处理指令
-CREATE TABLE IF NOT EXISTS issue_tasks (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  repo              TEXT NOT NULL,
-  issue_number      INTEGER NOT NULL,
-  requester_open_id TEXT NOT NULL,
-  hint              TEXT NOT NULL DEFAULT '',
-  status            TEXT NOT NULL,      -- open/consumed/closed
-  created_at        TEXT NOT NULL
-);
-
--- 处理草稿
-CREATE TABLE IF NOT EXISTS issue_drafts (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id    INTEGER NOT NULL,
-  comment_md TEXT NOT NULL,
-  actions    TEXT NOT NULL,             -- JSON 数组
-  status     TEXT NOT NULL,             -- pending_confirm/published/rejected
-  comment_url TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
--- 巡检水位（去重）
-CREATE TABLE IF NOT EXISTS issue_seen (
-  repo           TEXT NOT NULL,
-  issue_number   INTEGER NOT NULL,
-  first_seen_at  TEXT NOT NULL,
-  PRIMARY KEY (repo, issue_number)
 );
 
 -- 飞书事件去重
@@ -172,34 +117,8 @@ class Database:
 
     # ---------- 首启播种 ----------
     def seed_from_config(self, cipher=None) -> None:
-        """把 .env 的初值播种进三张单行配置表（已存在则不覆盖）。"""
-        self._seed_llm(cipher)
-        self._seed_digest_config()
+        """把 .env 的初值播种进知识库配置表（已存在则不覆盖）。"""
         self._seed_kb_config()
-
-    def _seed_llm(self, cipher=None) -> None:
-        api_enc = cipher.encrypt(Config.llm_api_key) if (cipher and Config.llm_api_key) else None
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                """INSERT OR IGNORE INTO llm_config
-                   (id, base_url, model, api_key_enc, timeout, updated_by, updated_at)
-                   VALUES (1, ?, ?, ?, ?, '', ?)""",
-                (Config.llm_base_url, Config.llm_model, api_enc, Config.llm_timeout, _now()),
-            )
-
-    def _seed_digest_config(self) -> None:
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                """INSERT OR IGNORE INTO digest_config
-                   (id, repos, days, schedule, enabled, last_run, updated_at)
-                   VALUES (1, ?, ?, ?, 1, '', ?)""",
-                (
-                    ",".join(Config.github_repos),
-                    max(1, Config.issue_digest_days),
-                    _normalize_schedule(Config.issue_digest_schedule),
-                    _now(),
-                ),
-            )
 
     def _seed_kb_config(self) -> None:
         with self._lock, self._conn() as conn:
@@ -241,84 +160,6 @@ class Database:
         with self._lock, self._conn() as conn:
             cur = conn.execute("DELETE FROM processed_events WHERE ts < ?", (cutoff_iso,))
             return cur.rowcount
-
-    # ---------- llm_config（单行配置）----------
-    def get_llm_config(self) -> sqlite3.Row:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM llm_config WHERE id=1").fetchone()
-        if row:
-            return row
-        # 兜底播种必须带上 cipher：否则 .env 的 Key 会被写成 NULL，
-        # 又因 INSERT OR IGNORE 永不回填，自检将一直显示「未配置」。
-        cipher = None
-        if Config.fernet_key:
-            from store.crypto import TokenCipher
-
-            try:
-                cipher = TokenCipher(Config.fernet_key)
-            except Exception:  # noqa: BLE001 - Key 非法时退化为无 cipher，不阻断读取
-                cipher = None
-        self._seed_llm(cipher)
-        with self._conn() as conn:
-            return conn.execute("SELECT * FROM llm_config WHERE id=1").fetchone()
-
-    def update_llm_config(self, **fields) -> None:
-        """按需更新 base_url/model/api_key_enc/timeout/updated_by。"""
-        allowed = {"base_url", "model", "api_key_enc", "timeout", "updated_by"}
-        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
-        if not updates:
-            return
-        if "timeout" in updates:
-            updates["timeout"] = max(1, int(updates["timeout"]))
-        cols = ", ".join(f"{k}=?" for k in updates)
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                f"UPDATE llm_config SET {cols}, updated_at=? WHERE id=1",
-                (*updates.values(), _now()),
-            )
-
-    def set_llm_api_key(self, cipher, plaintext: str, updated_by: str = "") -> None:
-        """加密后写入 api_key；plaintext 为空表示清空。"""
-        enc = cipher.encrypt(plaintext) if plaintext else None
-        self.update_llm_config(api_key_enc=enc, updated_by=updated_by)
-
-    # ---------- digest_config（单行配置）----------
-    def get_digest_config(self) -> sqlite3.Row:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM digest_config WHERE id=1").fetchone()
-        if row:
-            return row
-        self._seed_digest_config()
-        with self._conn() as conn:
-            return conn.execute("SELECT * FROM digest_config WHERE id=1").fetchone()
-
-    def update_digest_config(self, **fields) -> None:
-        """按需更新 repos/days/schedule/enabled。"""
-        allowed = {"repos", "days", "schedule", "enabled"}
-        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
-        if not updates:
-            return
-        if isinstance(updates.get("repos"), (list, tuple)):
-            updates["repos"] = ",".join(updates["repos"])
-        if "schedule" in updates:
-            updates["schedule"] = _normalize_schedule(updates["schedule"])
-        if "enabled" in updates:
-            updates["enabled"] = 1 if updates["enabled"] else 0
-        if "days" in updates:
-            updates["days"] = max(1, int(updates["days"]))
-        cols = ", ".join(f"{k}=?" for k in updates)
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                f"UPDATE digest_config SET {cols}, updated_at=? WHERE id=1",
-                (*updates.values(), _now()),
-            )
-
-    def mark_digest_run(self, date_str: str) -> None:
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                "UPDATE digest_config SET last_run=?, updated_at=? WHERE id=1",
-                (date_str, _now()),
-            )
 
     # ---------- kb_config（单行配置）----------
     def get_kb_config(self) -> sqlite3.Row:
@@ -390,143 +231,6 @@ class Database:
                      indexed_at=COALESCE(excluded.indexed_at, kb_index.indexed_at),
                      last_check_at=excluded.last_check_at""",
                 (repo, status, indexed_sha, _now() if indexed_sha else None, _now()),
-            )
-
-    # ---------- issue_seen（巡检水位）----------
-    def mark_issue_seen(self, repo: str, issue_number: int) -> bool:
-        """返回 True 表示首次见到该 issue。"""
-        with self._lock, self._conn() as conn:
-            cur = conn.execute(
-                """INSERT OR IGNORE INTO issue_seen (repo, issue_number, first_seen_at)
-                   VALUES (?, ?, ?)""",
-                (repo, int(issue_number), _now()),
-            )
-            return cur.rowcount == 1
-
-    def mark_issues_seen(self, repo: str, issue_numbers: list[int]) -> list[int]:
-        """批量登记巡检水位（单连接单事务）；返回其中「首次见到」的 issue 号列表。"""
-        fresh: list[int] = []
-        if not issue_numbers:
-            return fresh
-        now = _now()
-        with self._lock, self._conn() as conn:
-            for number in issue_numbers:
-                cur = conn.execute(
-                    """INSERT OR IGNORE INTO issue_seen (repo, issue_number, first_seen_at)
-                       VALUES (?, ?, ?)""",
-                    (repo, int(number), now),
-                )
-                if cur.rowcount == 1:
-                    fresh.append(int(number))
-        return fresh
-
-    def count_issue_seen(self, repo: str = "") -> int:
-        """已登记水位条数（便于自检 / 离线验证；repo 为空则统计全部）。"""
-        with self._conn() as conn:
-            if repo:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS n FROM issue_seen WHERE repo=?", (repo,)
-                ).fetchone()
-            else:
-                row = conn.execute("SELECT COUNT(*) AS n FROM issue_seen").fetchone()
-        return int(row["n"] if row else 0)
-
-    # ---------- issue_tasks / issue_drafts（M3 处理闭环）----------
-    def create_issue_task(
-        self, repo: str, issue_number: int, requester_open_id: str, hint: str = ""
-    ) -> int:
-        """建一条处理指令（status=open），返回 task_id。"""
-        with self._lock, self._conn() as conn:
-            cur = conn.execute(
-                """INSERT INTO issue_tasks
-                     (repo, issue_number, requester_open_id, hint, status, created_at)
-                   VALUES (?, ?, ?, ?, 'open', ?)""",
-                (repo, int(issue_number), requester_open_id, hint or "", _now()),
-            )
-            return int(cur.lastrowid)
-
-    def get_issue_task(self, task_id: int) -> Optional[sqlite3.Row]:
-        with self._conn() as conn:
-            return conn.execute(
-                "SELECT * FROM issue_tasks WHERE id=?", (int(task_id),)
-            ).fetchone()
-
-    def update_issue_task_status(self, task_id: int, status: str) -> None:
-        """issue_tasks 状态机：open → consumed → closed（平台触发失败时为 failed）。"""
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                "UPDATE issue_tasks SET status=? WHERE id=?", (status, int(task_id))
-            )
-
-    def get_latest_issue_task(self, repo: str, issue_number: int) -> Optional[sqlite3.Row]:
-        """按仓库 + 编号取最近一次处理任务（平台状态查询用）。"""
-        with self._conn() as conn:
-            return conn.execute(
-                """SELECT * FROM issue_tasks WHERE repo=? AND issue_number=?
-                   ORDER BY id DESC LIMIT 1""",
-                (repo, int(issue_number)),
-            ).fetchone()
-
-    def get_latest_issue_draft(self, task_id: int) -> Optional[sqlite3.Row]:
-        """取某任务最近一份草稿的轻量字段（不返回正文）。"""
-        with self._conn() as conn:
-            return conn.execute(
-                """SELECT id, status, comment_url, created_at, updated_at
-                   FROM issue_drafts WHERE task_id=? ORDER BY id DESC LIMIT 1""",
-                (int(task_id),),
-            ).fetchone()
-
-    def upsert_issue_draft(self, task_id: int, comment_md: str, actions_json: str) -> int:
-        """写入/替换该任务的待确认草稿；返回 draft_id。
-
-        重生成走「替换同一条 pending_confirm 草稿」，保证一个任务只有一份在途草稿。
-        """
-        with self._lock, self._conn() as conn:
-            existing = conn.execute(
-                """SELECT id FROM issue_drafts
-                   WHERE task_id=? AND status='pending_confirm' ORDER BY id DESC LIMIT 1""",
-                (int(task_id),),
-            ).fetchone()
-            now = _now()
-            if existing:
-                conn.execute(
-                    """UPDATE issue_drafts
-                       SET comment_md=?, actions=?, status='pending_confirm', updated_at=?
-                       WHERE id=?""",
-                    (comment_md, actions_json, now, existing["id"]),
-                )
-                return int(existing["id"])
-            cur = conn.execute(
-                """INSERT INTO issue_drafts
-                     (task_id, comment_md, actions, status, comment_url, created_at, updated_at)
-                   VALUES (?, ?, ?, 'pending_confirm', NULL, ?, ?)""",
-                (int(task_id), comment_md, actions_json, now, now),
-            )
-            return int(cur.lastrowid)
-
-    def get_issue_draft(self, draft_id: int) -> Optional[sqlite3.Row]:
-        with self._conn() as conn:
-            return conn.execute(
-                "SELECT * FROM issue_drafts WHERE id=?", (int(draft_id),)
-            ).fetchone()
-
-    def update_issue_draft(
-        self, draft_id: int, status: str | None = None, comment_url: str | None = None
-    ) -> None:
-        """更新草稿状态（published/rejected）与评论回链。"""
-        fields: dict[str, Any] = {}
-        if status:
-            fields["status"] = status
-        if comment_url is not None:
-            fields["comment_url"] = comment_url
-        if not fields:
-            return
-        fields["updated_at"] = _now()
-        cols = ", ".join(f"{k}=?" for k in fields)
-        with self._lock, self._conn() as conn:
-            conn.execute(
-                f"UPDATE issue_drafts SET {cols} WHERE id=?",
-                (*fields.values(), int(draft_id)),
             )
 
     # ---------- external_publishes（外部发布幂等）----------

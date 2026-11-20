@@ -1,14 +1,29 @@
-"""知识库抽象：索引状态数据结构 + 后端协议。
+"""知识库抽象：引用/回答数据结构、索引状态与后端协议。
 
-设计对齐 `agents/base.py` 的 `AgentBackend` 协议：`runtime_checkable` 协议，
-数据成员只声明不校验。`AnswerResult` / `Ref` 直接复用 `agents.base`，不重复定义。
+本服务不再内置 Agent/LLM；知识库只提供检索与 wiki 读取（`ask` 由 deepwiki 自身模型完成）。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from agents.base import AnswerResult
+
+@dataclass
+class Ref:
+    """一条知识库/代码/提交的引用出处。"""
+
+    kind: str  # "wiki" | "file" | "commit"
+    path: str = ""
+    url: str = ""
+    snippet: str = ""
+
+
+@dataclass
+class AnswerResult:
+    """一次知识库问答的结果。"""
+
+    text: str = ""
+    references: list[Ref] = field(default_factory=list)
 
 
 @dataclass

@@ -3,8 +3,8 @@
 工程约定对齐参考项目 review_agent：自带极简 .env 解析（不覆盖已存在的环境变量），
 `Config.validate()` 供启动自检调用。
 
-注意：`LLM_*` / `ISSUE_DIGEST_*` / `GITHUB_REPOS` / `KB_*` 里带单行配置表的部分，
-**首启播种进 DB 之后以 DB 为准**（飞书在线改的就是 DB），本文件的值只在首次运行时生效。
+注意：`GITHUB_REPOS` / `KB_*` 里带单行配置表的部分，**首启播种进 DB 之后以 DB 为准**，
+本文件的值只在首次运行时生效。本服务不内置 Agent/LLM 配置。
 """
 import os
 from pathlib import Path
@@ -69,17 +69,9 @@ class Config:
     github_bot_token: str = _env("GITHUB_BOT_TOKEN")
     # 持有/巡检的仓库列表（首启播种进 DB，之后以 DB 为准）；必填
     github_repos: list[str] = _env_list("GITHUB_REPOS", "AISBench/benchmark")
-    # 单仓库命令缺省目标（/kb refresh、/issue handle 等）
+    # 单仓库命令缺省目标（/kb refresh 等）
     github_default_repo: str = _env("GITHUB_DEFAULT_REPO", "AISBench/benchmark")
     github_api_base: str = _env("GITHUB_API_BASE", "https://api.github.com")
-
-    # --- issue 巡检与汇报 ---
-    # 默认回溯天数（首启播种进 digest_config）
-    issue_digest_days: int = _env_int("ISSUE_DIGEST_DAYS", 1)
-    # 每日定时 HH:MM，off 关闭（首启播种进 digest_config）
-    issue_digest_schedule: str = _env("ISSUE_DIGEST_SCHEDULE", "09:30")
-    # 判定"停滞"的无动向天数
-    issue_stall_days: int = _env_int("ISSUE_STALL_DAYS", 7)
 
     # --- 知识库（自托管 deepwiki-open）---
     kb_backend: str = _env("KB_BACKEND", "deepwiki_open")
@@ -104,41 +96,22 @@ class Config:
     # deepwiki-open 数据卷路径（备份/还原对象；应与 KB_BACKUP_DIR 不同盘）
     kb_data_dir: str = _env("KB_DATA_DIR", "./data/deepwiki_open")
 
-    # --- Agent 层（所有模型调用的唯一入口）---
-    # 选用后端；内置：echo（pydantic_ai 属 M1 起启用）
-    agent_backend: str = _env("AGENT_BACKEND", "pydantic_ai")
-    # 后端不可用时的降级链（逗号分隔，按序下探）
-    agent_fallback: list[str] = _env_list("AGENT_FALLBACK", "echo")
-    agent_tools_enabled: bool = _env_bool("AGENT_TOOLS_ENABLED", True)
-    agent_max_turns: int = _env_int("AGENT_MAX_TURNS", 8)
-    # 可选 MCP server（JSON 数组），留空则不挂载（含官方 DeepWiki MCP）
-    agent_mcp_servers: str = _env("AGENT_MCP_SERVERS")
-
-    # --- LLM（OpenAI 兼容端点；首启播种进 llm_config，之后以 DB 为准）---
-    llm_base_url: str = _env("LLM_BASE_URL", "https://api.openai.com/v1")
-    llm_api_key: str = _env("LLM_API_KEY")
-    llm_model: str = _env("LLM_MODEL", "gpt-4o-mini")
-    llm_timeout: int = _env_int("LLM_TIMEOUT", 600)
-
     # --- 平台接入 HTTP API（默认关闭）---
-    # 兼容旧 issue_master 的 ISSUE_MASTER_API_* 环境变量。
-    api_enabled: bool = _env_bool("ADAPTOR_API_ENABLED", False) or _env_bool("ISSUE_MASTER_API_ENABLED", False)
+    api_enabled: bool = _env_bool("ADAPTOR_API_ENABLED", False)
     # 监听地址：默认仅回环；跨主机部署改 0.0.0.0 或内网地址
-    api_host: str = _env("ADAPTOR_API_HOST") or _env("ISSUE_MASTER_API_HOST", "127.0.0.1")
-    api_port: int = _env_int("ADAPTOR_API_PORT", _env_int("ISSUE_MASTER_API_PORT", 8091))
+    api_host: str = _env("ADAPTOR_API_HOST", "127.0.0.1")
+    api_port: int = _env_int("ADAPTOR_API_PORT", 8091)
     # 共享令牌：启用 API 时必填
-    api_token: str = _env("ADAPTOR_API_TOKEN") or _env("ISSUE_MASTER_API_TOKEN")
+    api_token: str = _env("ADAPTOR_API_TOKEN")
     # 可选：直接 TLS 监听（留空走明文，建议反向代理终止 TLS）
-    api_tls_cert: str = _env("ADAPTOR_API_TLS_CERT") or _env("ISSUE_MASTER_API_TLS_CERT")
-    api_tls_key: str = _env("ADAPTOR_API_TLS_KEY") or _env("ISSUE_MASTER_API_TLS_KEY")
+    api_tls_cert: str = _env("ADAPTOR_API_TLS_CERT")
+    api_tls_key: str = _env("ADAPTOR_API_TLS_KEY")
     # 每分钟最大请求数
-    api_rate_limit: int = _env_int("ADAPTOR_API_RATE_LIMIT", _env_int("ISSUE_MASTER_API_RATE_LIMIT", 30))
+    api_rate_limit: int = _env_int("ADAPTOR_API_RATE_LIMIT", 30)
 
     # --- 本服务 ---
     fernet_key: str = _env("FERNET_KEY")
     db_path: str = _env("DB_PATH", "./data/agent-adaptor.db")
-    # 任务队列 worker 线程数（内部 LLM 草稿生成 / KB 备份）
-    queue_workers: int = _env_int("QUEUE_WORKERS", 2)
     # 自定义 CA bundle（例如代理的中间人自签名根证书）；留空则用系统默认
     ca_bundle: str = _env("CA_BUNDLE")
 

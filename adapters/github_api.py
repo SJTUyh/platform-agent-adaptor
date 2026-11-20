@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from config import Config
 
-logger = logging.getLogger("issue_master.github")
+logger = logging.getLogger("agent_adaptor.github")
 
 # 单仓库单次最多拉取的 issue 数（避免刷屏与模型成本失控）
 _MAX_ISSUES_PER_REPO = 100
@@ -145,7 +145,7 @@ class GitHubApi:
     """issue 读写 + 连通性/权限探测。token 由外部 provider 提供。
 
     读方法供巡检用；写方法（post_comment / add_labels / assign / close …）
-    仅在 M3 人工确认后由 `engine.issue_handle` 调用。
+    仅在人工确认后由 `engine.publish` 调用。
     """
 
     def __init__(

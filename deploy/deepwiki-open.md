@@ -3,7 +3,7 @@
 本文档覆盖：自托管 **deepwiki-open** 起服务 → 本项目对接 → 验证清单 → 备份 / 还原演练。
 
 > 口径说明：deepwiki-open 自身的 LLM / embedder 配置在其**自己的 `.env`** 内，
-> 与本项目 `LLM_*` **相互独立**，互不影响。
+> 与本服务无关：platform-agent-adaptor 不内置 Agent/LLM，只做检索与发布动作。
 
 ---
 
@@ -18,7 +18,7 @@
    pip install -r requirements.txt
    ```
 
-2. 配置 deepwiki-open 自己的 `.env`（**与 issue-master 的 `.env` 是两个文件**）：
+2. 配置 deepwiki-open 自己的 `.env`（**与 platform-agent-adaptor 的 `.env` 是两个文件**）：
 
    ```dotenv
    # 生成答案用的 LLM（OpenAI 兼容）
@@ -120,7 +120,7 @@ deepwiki-open 的路由前缀可能是 `/repo/...` 也可能是 `/api/repo/...`�
 
 ### 步骤
 
-1. **停服务**：停止 issue-master 进程（避免还原时写入）。
+1. **停服务**：停止 platform-agent-adaptor 进程（避免还原时写入）。
 2. **备份**：
 
    ```bash
@@ -147,10 +147,10 @@ deepwiki-open 的路由前缀可能是 `/repo/...` 也可能是 `/api/repo/...`�
    # 数据卷恢复
    ls ./data/deepwiki_open
    # DB 两表恢复（行数应与备份时 manifest 一致）
-   python -c "import sqlite3;c=sqlite3.connect('./data/issue_master.db');print('kb_index',c.execute('select count(*) from kb_index').fetchone()[0]);print('kb_cache',c.execute('select count(*) from kb_cache').fetchone()[0])"
+   python -c "import sqlite3;c=sqlite3.connect('./data/agent-adaptor.db');print('kb_index',c.execute('select count(*) from kb_index').fetchone()[0]);print('kb_cache',c.execute('select count(*) from kb_cache').fetchone()[0])"
    ```
 
-6. 重启 issue-master，`@机器人 /kb status` 应显示与备份前一致的索引状态。
+6. 重启 platform-agent-adaptor，`@机器人 /kb status` 应显示与备份前一致的索引状态。
 
 ### 实测记录（待填）
 
@@ -177,7 +177,7 @@ deepwiki-open 的路由前缀可能是 `/repo/...` 也可能是 `/api/repo/...`�
 
 ## 七、本地补丁：只检索端点 `/retrieval`
 
-为支持平台 Agent 接入（issue-master `/api/v1/kb/search`），本机 deepwiki-open 增加了一个**只新增、不改既有逻辑**的补丁：
+为支持平台 Agent 接入（platform-agent-adaptor `/api/v1/kb/search`），本机 deepwiki-open 增加了一个**只新增、不改既有逻辑**的补丁：
 
 - 新增 `api/routers/retrieval.py`：`POST /retrieval`
   - 入参：`repo_url`、`type`、`query`、`top_k`（1~12）、`provider`、`model`、`token?`
@@ -186,6 +186,6 @@ deepwiki-open 的路由前缀可能是 `/repo/...` 也可能是 `/api/repo/...`�
   - 未索引返回 425，其余错误返回 500
 - `api/main.py` 仅两处一行改动：导入 `retrieval` 并加入 `app.include_router` 列表
 
-注意：`provider`/`model` 必须与建索引时一致（embedding 维度不同会报错）；issue-master 会透传 `KB_PROVIDER` / `KB_MODEL`。
+注意：`provider`/`model` 必须与建索引时一致（embedding 维度不同会报错）；platform-agent-adaptor 会透传 `KB_PROVIDER` / `KB_MODEL`。
 
 上游升级后需重新应用该补丁（重放上述文件改动），索引数据不受影响。

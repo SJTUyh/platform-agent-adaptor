@@ -10,7 +10,7 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError
 
 from app.http_api import create_http_server, start_in_thread
-from engine.issue_handle import IssueHandleEngine
+from engine.publish import ExternalPublishEngine
 from store.db import Database
 
 
@@ -223,11 +223,11 @@ class FakeGitHub:
 
 class ExternalPublishEngineTest(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.mkdtemp(prefix="issue-master-publish-")
+        self.directory = tempfile.mkdtemp(prefix="agent-adaptor-publish-")
         self.path = os.path.join(self.directory, "test.sqlite")
         self.db = Database(self.path)
         self.github = FakeGitHub()
-        self.engine = IssueHandleEngine(self.db, self.github, backend=None)
+        self.engine = ExternalPublishEngine(self.db, self.github)
 
     def tearDown(self):
         import shutil

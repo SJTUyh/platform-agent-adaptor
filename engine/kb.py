@@ -10,12 +10,11 @@ import logging
 import threading
 import time
 
-from agents.base import AnswerResult, Ref
 from config import Config
-from knowledge.base import RepoKnowledgeBase
+from knowledge.base import AnswerResult, Ref, RepoKnowledgeBase
 from store.db import Database
 
-logger = logging.getLogger("issue_master.kb")
+logger = logging.getLogger("agent_adaptor.kb")
 
 
 class KbEngine:
